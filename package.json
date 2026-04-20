@@ -1,0 +1,30 @@
+{
+  "name": "asana-mcp",
+  "version": "0.1.0",
+  "description": "Asana MCP server for Claude Code — tasks, projects, sections, tags, and stories via PAT tokens.",
+  "type": "module",
+  "bin": {
+    "asana-mcp": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx src/index.ts",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "keywords": ["mcp", "asana", "tasks", "projects"],
+  "author": "David Chang",
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "asana": "^3.0.12",
+    "commander": "^14.0.3",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@types/node": "^25.6.0",
+    "tsx": "^4.21.0",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.4"
+  }
+}
