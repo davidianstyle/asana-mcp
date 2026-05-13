@@ -5,6 +5,7 @@ import { registerProjectsTools } from "./services/projects/index.js";
 import { registerSectionsTools } from "./services/sections/index.js";
 import { registerTagsTools } from "./services/tags/index.js";
 import { registerStoriesTools } from "./services/stories/index.js";
+import { registerCustomFieldsTools } from "./services/custom-fields/index.js";
 
 export function createServer(ctx: ServiceContext): McpServer {
   const server = new McpServer({
@@ -17,6 +18,7 @@ export function createServer(ctx: ServiceContext): McpServer {
   registerSectionsTools(server, ctx);
   registerTagsTools(server, ctx);
   registerStoriesTools(server, ctx);
+  registerCustomFieldsTools(server, ctx);
 
   return server;
 }
