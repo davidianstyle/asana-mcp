@@ -133,7 +133,12 @@ export function registerTasksTools(
       assignee: z.string().optional().describe("Assignee GID or 'me'"),
       parent: z.string().optional().describe("Parent task GID"),
       projects: z.array(z.string()).optional().describe("Additional project GIDs"),
-      resource_subtype: z.enum(["default_task", "milestone"]).optional(),
+      resource_subtype: z
+        .enum(["default_task", "milestone"])
+        .optional()
+        .describe(
+          "Task subtype. 'default_task' is the standard unit of work; 'milestone' renders with a diamond icon and is the right call for project-level outcomes. Mutable via asana_update_task."
+        ),
     },
     async ({ project_id, projects: extraProjects, ...taskData }) => {
       const allProjects = [project_id, ...(extraProjects || [])];
@@ -154,6 +159,12 @@ export function registerTasksTools(
       assignee: z.string().optional().describe("New assignee GID or 'me'"),
       completed: z.boolean().optional().describe("Mark as completed or not"),
       custom_fields: z.record(z.string(), z.unknown()).optional().describe("Custom field GID→value map"),
+      resource_subtype: z
+        .enum(["default_task", "milestone"])
+        .optional()
+        .describe(
+          "Convert between task subtypes. Pass 'milestone' to mark a row as a milestone (diamond icon, used for project-level outcomes); 'default_task' converts back to a standard task. Mutation preserves gid, custom fields, subtasks, stories, and project membership."
+        ),
     },
     async ({ task_id, ...updates }) => {
       const api = tasks() as unknown as Record<string, (...args: unknown[]) => Promise<Record<string, unknown>>>;
