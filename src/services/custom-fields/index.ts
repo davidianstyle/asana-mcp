@@ -53,7 +53,12 @@ export function registerCustomFieldsTools(
         .array(
           z.object({
             name: z.string(),
-            color: z.string().optional().describe("Asana color name (e.g. 'blue', 'red', 'green-blue')"),
+            color: z
+            .string()
+            .optional()
+            .describe(
+              "Enum-option color. Valid values: red, magenta, hot-pink, pink, purple, indigo, blue, blue-green, green, yellow-green, yellow, yellow-orange, orange, cool-gray, none. NOTE: this is a DIFFERENT palette than project icon colors (those use light-/dark- prefixes). 'red-orange' is NOT valid and will return Forbidden."
+            ),
             enabled: z.boolean().optional(),
           })
         )
@@ -110,7 +115,12 @@ export function registerCustomFieldsTools(
     {
       custom_field_gid: z.string().describe("Custom field GID (must be enum/multi_enum type)"),
       name: z.string().describe("Option display name"),
-      color: z.string().optional().describe("Asana color name"),
+      color: z
+        .string()
+        .optional()
+        .describe(
+          "Enum-option color. Valid values: red, magenta, hot-pink, pink, purple, indigo, blue, blue-green, green, yellow-green, yellow, yellow-orange, orange, cool-gray, none."
+        ),
       enabled: z.boolean().optional().describe("Whether the option is selectable"),
       insert_before: z.string().optional().describe("Existing enum option GID to insert before"),
       insert_after: z.string().optional().describe("Existing enum option GID to insert after"),
@@ -127,7 +137,12 @@ export function registerCustomFieldsTools(
     {
       enum_option_gid: z.string().describe("Enum option GID"),
       name: z.string().optional(),
-      color: z.string().optional(),
+      color: z
+        .string()
+        .optional()
+        .describe(
+          "Enum-option color. Valid values: red, magenta, hot-pink, pink, purple, indigo, blue, blue-green, green, yellow-green, yellow, yellow-orange, orange, cool-gray, none."
+        ),
       enabled: z.boolean().optional(),
     },
     async ({ enum_option_gid, ...updates }) => {

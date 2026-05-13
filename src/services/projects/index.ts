@@ -66,8 +66,23 @@ export function registerProjectsTools(
       workspace: z.string().describe("Workspace GID"),
       name: z.string().describe("Project name"),
       notes: z.string().optional().describe("Project description"),
-      color: z.string().optional().describe("Project color"),
+      color: z
+        .string()
+        .optional()
+        .describe(
+          "Project icon color. Asana's project palette uses light- / dark- prefixes — valid values include: light-pink, light-green, light-blue, light-red, light-teal, light-brown, light-orange, light-purple, light-warm-gray, dark-pink, dark-green, dark-blue, dark-red, dark-teal, dark-brown, dark-orange, dark-purple, dark-warm-gray, none. Note: this is a DIFFERENT palette than enum-option colors (those are red/blue/blue-green/etc. without prefixes)."
+        ),
       team: z.string().optional().describe("Team GID"),
+      privacy_setting: z
+        .enum(["public_to_workspace", "private_to_team", "private"])
+        .optional()
+        .describe(
+          "Project visibility. public_to_workspace = anyone in the workspace can view (best for cross-functional boards). private_to_team = team members only. private = explicit members only. Defaults to private if omitted."
+        ),
+      default_view: z
+        .enum(["list", "board", "calendar", "timeline"])
+        .optional()
+        .describe("Default view mode when opening the project. Defaults to list if omitted."),
     },
     async ({ workspace, ...projectData }) => {
       const res = await projects().createProjectForWorkspace({ data: projectData }, workspace);
@@ -83,7 +98,20 @@ export function registerProjectsTools(
       name: z.string().optional().describe("New project name"),
       notes: z.string().optional().describe("New description"),
       archived: z.boolean().optional().describe("Archive or unarchive"),
-      color: z.string().optional().describe("New color"),
+      color: z
+        .string()
+        .optional()
+        .describe(
+          "New project icon color. Valid values: light-pink, light-green, light-blue, light-red, light-teal, light-brown, light-orange, light-purple, light-warm-gray, dark-pink, dark-green, dark-blue, dark-red, dark-teal, dark-brown, dark-orange, dark-purple, dark-warm-gray, none. (Different palette from enum-option colors.)"
+        ),
+      privacy_setting: z
+        .enum(["public_to_workspace", "private_to_team", "private"])
+        .optional()
+        .describe("Project visibility. public_to_workspace makes the project readable by anyone in the workspace."),
+      default_view: z
+        .enum(["list", "board", "calendar", "timeline"])
+        .optional()
+        .describe("Default view mode when opening the project."),
     },
     async ({ project_id, ...updates }) => {
       const res = await projects().updateProject({ data: updates }, project_id);
