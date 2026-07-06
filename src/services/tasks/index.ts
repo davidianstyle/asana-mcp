@@ -16,6 +16,17 @@ import {
   assertMutuallyExclusive,
   assertExactlyOneOf,
 } from "./validation.js";
+import {
+  chunk,
+  MAX_BATCH_ACTIONS,
+  isBatchActionSuccess,
+  batchActionErrorMessage,
+  buildGetTaskAction,
+  buildTaskUpdateActions,
+  assembleBatchUpdateResults,
+  BatchActionResult,
+  TaskBatchUpdateInput,
+} from "./batch.js";
 
 // The generated .d.ts for searchTasksForWorkspace omits `limit` even though Asana's
 // docs ("Page sizes are limited to a maximum of 100 items, and can be specified by
@@ -31,6 +42,7 @@ export function registerTasksTools(
 ): void {
   const tasks = () => new Asana.TasksApi(ctx.apiClient);
   const sections = () => new Asana.SectionsApi(ctx.apiClient);
+  const batchApi = () => new Asana.BatchAPIApi(ctx.apiClient);
 
   server.tool(
     "asana_search_tasks",
@@ -106,10 +118,115 @@ export function registerTasksTools(
         opt_fields,
         "name,due_on,completed,assignee.name,projects.name,permalink_url,resource_subtype,num_subtasks,parent.name"
       );
-      const results = await Promise.all(
-        task_ids.map((id) => tasks().getTask(id, { opt_fields: fields }).then((r) => r.data))
+      // Chunked via the Batch API (POST /batch, max 10 actions/request) instead of up
+      // to 25 unbounded parallel GETs — see src/services/tasks/batch.ts.
+      const idChunks = chunk(task_ids, MAX_BATCH_ACTIONS);
+      const chunkResults = await Promise.all(
+        idChunks.map(async (ids) => {
+          const actions = ids.map((id) => buildGetTaskAction(id, fields));
+          const res = await batchApi().createBatchRequest({ data: { actions } });
+          return (res.data ?? []) as BatchActionResult[];
+        })
       );
-      return textResult(results);
+      const results = chunkResults.flat();
+
+      const failures = results
+        .map((result, i) => ({ id: task_ids[i], result }))
+        .filter(({ result }) => !isBatchActionSuccess(result));
+      if (failures.length > 0) {
+        const message = failures
+          .map(({ id, result }) => `${id}: ${batchActionErrorMessage(result.body)}`)
+          .join("; ");
+        throw new Error(`Failed to fetch ${failures.length} of ${task_ids.length} task(s): ${message}`);
+      }
+
+      return textResult(results.map((result) => (result.body as { data: unknown }).data));
+    })
+  );
+
+  server.tool(
+    "asana_batch_update_tasks",
+    "Bulk-update up to 50 tasks in one round trip (complete, reassign, change dates, move between sections) via Asana's Batch API. Each update becomes one or two batch actions (a field PUT and/or a section-move POST), chunked into requests of up to 10 actions. Returns per-action success/error results in the same order as `updates`.",
+    {
+      updates: z
+        .array(
+          z.object({
+            task_id: z.string().describe("Task GID to update"),
+            name: z.string().optional().describe("New task name"),
+            notes: z.string().optional().describe("New description"),
+            html_notes: z.string().optional().describe("New HTML description"),
+            completed: z.boolean().optional().describe("Mark as completed or not"),
+            assignee: z.string().optional().describe("New assignee GID or 'me'"),
+            due_on: nullableDateField().describe(
+              'New due date (YYYY-MM-DD). Pass null (or "null") to clear it. Mutually exclusive with due_at.'
+            ),
+            due_at: nullableDatetimeField().describe(
+              'New due date and time, ISO 8601 UTC. Pass null (or "null") to clear it. Mutually exclusive with due_on.'
+            ),
+            start_on: nullableDateField().describe(
+              'New start date (YYYY-MM-DD). Pass null (or "null") to clear it. Mutually exclusive with start_at.'
+            ),
+            start_at: nullableDatetimeField().describe(
+              'New start date and time, ISO 8601 UTC. Pass null (or "null") to clear it. Mutually exclusive with start_on.'
+            ),
+            section_id: z
+              .string()
+              .optional()
+              .describe(
+                "Move the task into this section (GID) — a separate batch action from any field updates above."
+              ),
+            insert_before: z.string().optional().describe("When moving into a section, task GID to insert before"),
+            insert_after: z.string().optional().describe("When moving into a section, task GID to insert after"),
+          })
+        )
+        .min(1)
+        .max(50)
+        .describe(
+          "Per-task updates; each becomes 0-2 batch actions (a field PUT and/or a section-move POST)."
+        ),
+    },
+    withErrorHandling(async ({ updates }) => {
+      for (const update of updates) {
+        assertMutuallyExclusive(update, [
+          ["due_on", "due_at"],
+          ["start_on", "start_at"],
+        ]);
+      }
+
+      const groups = updates.map((update) => {
+        const { task_id, section_id, insert_before, insert_after, due_on, due_at, start_on, start_at, ...rest } =
+          update;
+        const normalized: TaskBatchUpdateInput = {
+          task_id,
+          section_id,
+          insert_before,
+          insert_after,
+          ...rest,
+          ...(due_on !== undefined ? { due_on: clearNullSentinel(due_on) } : {}),
+          ...(due_at !== undefined ? { due_at: clearNullSentinel(due_at) } : {}),
+          ...(start_on !== undefined ? { start_on: clearNullSentinel(start_on) } : {}),
+          ...(start_at !== undefined ? { start_at: clearNullSentinel(start_at) } : {}),
+        };
+        return { task_id, plans: buildTaskUpdateActions(normalized) };
+      });
+
+      const flatPlans = groups.flatMap((g) => g.plans);
+      if (flatPlans.length === 0) {
+        return textResult({ results: assembleBatchUpdateResults(groups, []) });
+      }
+
+      const planChunks = chunk(flatPlans, MAX_BATCH_ACTIONS);
+      const chunkResults = await Promise.all(
+        planChunks.map(async (planChunk) => {
+          const res = await batchApi().createBatchRequest({
+            data: { actions: planChunk.map((p) => p.action) },
+          });
+          return (res.data ?? []) as BatchActionResult[];
+        })
+      );
+      const flatResults = chunkResults.flat();
+
+      return textResult({ results: assembleBatchUpdateResults(groups, flatResults) });
     })
   );
 
