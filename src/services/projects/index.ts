@@ -6,6 +6,7 @@ import { textResult } from "../../utils/formatting.js";
 import { withErrorHandling } from "../../utils/errors.js";
 import { parseOptFields } from "../../utils/optFields.js";
 import { limitParam, offsetParam, paginationOpts, pagedResult } from "../../utils/pagination.js";
+import { resolveStatusType } from "./statusType.js";
 
 export function registerProjectsTools(
   server: McpServer,
@@ -186,22 +187,32 @@ export function registerProjectsTools(
 
   server.tool(
     "asana_create_project_status",
-    "Create a status update for a project",
+    "Create a status update for a project. The underlying StatusUpdate resource is keyed on status_type, not color — when status_type is omitted it is derived from color (green→on_track, yellow→at_risk, red→off_track), and color itself is never sent to the API. The response is a status_update record (no color field).",
     {
       project_id: z.string().describe("Project GID"),
       text: z.string().describe("Status text"),
-      color: z.enum(["green", "yellow", "red"]).describe("Status color"),
+      color: z
+        .enum(["green", "yellow", "red"])
+        .describe(
+          "Status color — used only to derive status_type when that isn't given (green→on_track, yellow→at_risk, red→off_track); not sent to the API."
+        ),
       title: z.string().optional().describe("Status title"),
       status_type: z
-        .enum(["on_track", "at_risk", "off_track", "on_hold"])
+        .enum(["on_track", "at_risk", "off_track", "on_hold", "complete", "dropped"])
         .optional()
         .describe(
-          "Structured status signal (distinct from color), surfaced in status rollups. Defaults to Asana's own color-derived mapping when omitted."
+          "Structured status signal, surfaced in status rollups. Overrides the color-derived value when given."
         ),
     },
-    withErrorHandling(async ({ project_id, ...statusData }) => {
+    withErrorHandling(async ({ project_id, color, status_type, ...statusData }) => {
+      // POST /status_updates requires status_type and its request schema has
+      // no color property — see statusType.ts.
       const res = await statusUpdates().createStatusForObject({
-        data: { parent: project_id, ...statusData },
+        data: {
+          parent: project_id,
+          status_type: resolveStatusType(color, status_type),
+          ...statusData,
+        },
       });
       return textResult(res.data);
     })
