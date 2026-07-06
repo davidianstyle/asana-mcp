@@ -27,6 +27,7 @@ import {
   BatchActionResult,
   TaskBatchUpdateInput,
 } from "./batch.js";
+import { pollJob, JobLike } from "./jobs.js";
 
 // The generated .d.ts for searchTasksForWorkspace omits `limit` even though Asana's
 // docs ("Page sizes are limited to a maximum of 100 items, and can be specified by
@@ -43,6 +44,7 @@ export function registerTasksTools(
   const tasks = () => new Asana.TasksApi(ctx.apiClient);
   const sections = () => new Asana.SectionsApi(ctx.apiClient);
   const batchApi = () => new Asana.BatchAPIApi(ctx.apiClient);
+  const jobsApi = () => new Asana.JobsApi(ctx.apiClient);
 
   server.tool(
     "asana_search_tasks",
@@ -598,6 +600,65 @@ export function registerTasksTools(
         opt_fields: parseOptFields(opt_fields, "name,followers.name"),
       });
       return textResult(res.data);
+    })
+  );
+
+  server.tool(
+    "asana_duplicate_task",
+    "Duplicate a task — the primitive for recurrence (duplicate a template or the previous occurrence to create the next one). Asana runs the duplication as an async job; this tool polls it for up to ~30s. If the job hasn't finished by then, it returns the job's gid with status 'still_running' instead of failing — the duplication keeps running server-side, so check back (e.g. via asana_get_task once you know the new task's gid, or re-run this tool's underlying job check) rather than retrying the duplication itself.",
+    {
+      task_id: z.string().describe("Task GID to duplicate"),
+      name: z.string().optional().describe("Name for the duplicate. Defaults to Asana's own naming (based on the original) if omitted."),
+      include: z
+        .array(
+          z.enum([
+            "assignee",
+            "attachments",
+            "dates",
+            "dependencies",
+            "followers",
+            "notes",
+            "parent",
+            "projects",
+            "subtasks",
+            "tags",
+          ])
+        )
+        .optional()
+        .describe("Which aspects of the original task to carry over to the duplicate. Omit to use Asana's own default set."),
+      opt_fields: z.string().optional().describe("Comma-separated fields to include on the resulting task, once the job succeeds"),
+    },
+    withErrorHandling(async ({ task_id, name, include, opt_fields }) => {
+      const newTaskFields = parseOptFields(opt_fields, "name,permalink_url");
+      const jobOptFields = ["status", "new_task", ...newTaskFields.map((f) => `new_task.${f}`)];
+
+      const body: Record<string, unknown> = {};
+      if (name !== undefined) body.name = name;
+      if (include !== undefined) body.include = include;
+
+      const jobRes = await tasks().duplicateTask({ data: body }, task_id, {
+        opt_fields: jobOptFields,
+      });
+      const initialJob = jobRes.data as JobLike;
+
+      const { job, timedOut } = await pollJob(async () => {
+        const res = await jobsApi().getJob(initialJob.gid, { opt_fields: jobOptFields });
+        return res.data as JobLike;
+      });
+
+      if (timedOut) {
+        return textResult({
+          job_gid: job.gid,
+          status: "still_running",
+          note: "The duplication job hasn't finished within ~30s — it is still running server-side. Check back later (e.g. asana_get_task once you have the new task's gid) rather than retrying the duplication.",
+        });
+      }
+
+      if (job.status === "failed") {
+        throw new Error(`Task duplication job ${job.gid} failed.`);
+      }
+
+      return textResult({ job_gid: job.gid, status: job.status, new_task: job.new_task });
     })
   );
 }
