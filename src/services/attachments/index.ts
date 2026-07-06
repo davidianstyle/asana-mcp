@@ -24,7 +24,7 @@ export function registerAttachmentsTools(server: McpServer, ctx: ServiceContext)
 
   server.tool(
     "asana_get_attachments_for_task",
-    "List attachments on a task (compact records: name, download_url, host, resource_subtype, size)",
+    "List attachments on a task (compact records: name, download_url, host, resource_subtype, size). Note: download_url is a short-lived signed URL — fetch it promptly, don't cache it.",
     {
       task_id: z.string().describe("Task GID"),
       limit: limitParam,
@@ -42,7 +42,7 @@ export function registerAttachmentsTools(server: McpServer, ctx: ServiceContext)
 
   server.tool(
     "asana_get_attachment",
-    "Get the full record for a single attachment, including its download_url",
+    "Get the full record for a single attachment, including its download_url. Note: download_url is a short-lived signed URL — fetch it promptly, don't cache it.",
     {
       attachment_id: z.string().describe("Attachment GID"),
       opt_fields: z.string().optional().describe("Comma-separated fields to include"),
