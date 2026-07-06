@@ -7,6 +7,15 @@ import { withErrorHandling } from "../../utils/errors.js";
 import { parseOptFields } from "../../utils/optFields.js";
 import { limitParam, offsetParam, paginationOpts, pagedResult } from "../../utils/pagination.js";
 import { mapSearchFilterParams } from "./searchFilterMap.js";
+import {
+  dateField,
+  datetimeField,
+  nullableDateField,
+  nullableDatetimeField,
+  clearNullSentinel,
+  assertMutuallyExclusive,
+  assertExactlyOneOf,
+} from "./validation.js";
 
 // The generated .d.ts for searchTasksForWorkspace omits `limit` even though Asana's
 // docs ("Page sizes are limited to a maximum of 100 items, and can be specified by
@@ -175,24 +184,59 @@ export function registerTasksTools(
     "asana_create_task",
     "Create a new task",
     {
-      project_id: z.string().describe("Project GID to create the task in"),
+      project_id: z
+        .string()
+        .optional()
+        .describe("Project GID to create the task in. Provide exactly one of project_id or workspace."),
+      workspace: z
+        .string()
+        .optional()
+        .describe(
+          "Workspace GID for an untargeted task — lands in the creator's My Tasks list (useful for quick GTD-style capture before triaging into a project). Provide exactly one of project_id or workspace."
+        ),
       name: z.string().describe("Task name"),
       notes: z.string().optional().describe("Task description"),
       html_notes: z.string().optional().describe("HTML-formatted task description"),
-      due_on: z.string().optional().describe("Due date (YYYY-MM-DD)"),
+      due_on: dateField().optional().describe("Due date (YYYY-MM-DD). Mutually exclusive with due_at."),
+      due_at: datetimeField()
+        .optional()
+        .describe("Due date and time, ISO 8601 UTC (e.g. 2026-01-15T09:00:00Z). Mutually exclusive with due_on."),
+      start_on: dateField().optional().describe("Start date (YYYY-MM-DD). Mutually exclusive with start_at."),
+      start_at: datetimeField()
+        .optional()
+        .describe("Start date and time, ISO 8601 UTC. Mutually exclusive with start_on."),
       assignee: z.string().optional().describe("Assignee GID or 'me'"),
       parent: z.string().optional().describe("Parent task GID"),
       projects: z.array(z.string()).optional().describe("Additional project GIDs"),
-      resource_subtype: z
-        .enum(["default_task", "milestone"])
+      custom_fields: z
+        .record(z.string(), z.unknown())
         .optional()
         .describe(
-          "Task subtype. 'default_task' is the standard unit of work; 'milestone' renders with a diamond icon and is the right call for project-level outcomes. Mutable via asana_update_task."
+          "Custom field GID→value map. Setting this at create time avoids a separate create-then-update round trip."
+        ),
+      resource_subtype: z
+        .enum(["default_task", "milestone", "approval"])
+        .optional()
+        .describe(
+          "Task subtype. 'default_task' is the standard unit of work; 'milestone' renders with a diamond icon and is the right call for project-level outcomes; 'approval' renders approve/reject actions instead of a checkbox — pair with asana_update_task's approval_status to record the decision. Mutable via asana_update_task."
         ),
     },
-    withErrorHandling(async ({ project_id, projects: extraProjects, ...taskData }) => {
-      const allProjects = [project_id, ...(extraProjects || [])];
-      const res = await tasks().createTask({ data: { ...taskData, projects: allProjects } });
+    withErrorHandling(async ({ project_id, workspace, projects: extraProjects, ...taskData }) => {
+      assertExactlyOneOf({ project_id, workspace }, ["project_id", "workspace"]);
+      assertMutuallyExclusive(taskData, [
+        ["due_on", "due_at"],
+        ["start_on", "start_at"],
+      ]);
+
+      const body: Record<string, unknown> = { ...taskData };
+      if (project_id !== undefined) {
+        body.projects = [project_id, ...(extraProjects || [])];
+      } else {
+        body.workspace = workspace;
+        if (extraProjects && extraProjects.length > 0) body.projects = extraProjects;
+      }
+
+      const res = await tasks().createTask({ data: body });
       return textResult(res.data);
     })
   );
@@ -205,18 +249,46 @@ export function registerTasksTools(
       name: z.string().optional().describe("New task name"),
       notes: z.string().optional().describe("New description"),
       html_notes: z.string().optional().describe("New HTML description"),
-      due_on: z.string().optional().describe("New due date (YYYY-MM-DD)"),
+      due_on: nullableDateField().describe(
+        'New due date (YYYY-MM-DD). Pass null (or the string "null") to clear it. Mutually exclusive with due_at.'
+      ),
+      due_at: nullableDatetimeField().describe(
+        'New due date and time, ISO 8601 UTC. Pass null (or "null") to clear it. Mutually exclusive with due_on.'
+      ),
+      start_on: nullableDateField().describe(
+        'New start date (YYYY-MM-DD). Pass null (or "null") to clear it. Mutually exclusive with start_at.'
+      ),
+      start_at: nullableDatetimeField().describe(
+        'New start date and time, ISO 8601 UTC. Pass null (or "null") to clear it. Mutually exclusive with start_on.'
+      ),
       assignee: z.string().optional().describe("New assignee GID or 'me'"),
       completed: z.boolean().optional().describe("Mark as completed or not"),
-      custom_fields: z.record(z.string(), z.unknown()).optional().describe("Custom field GID→value map"),
-      resource_subtype: z
-        .enum(["default_task", "milestone"])
+      approval_status: z
+        .enum(["pending", "approved", "rejected", "changes_requested"])
         .optional()
         .describe(
-          "Convert between task subtypes. Pass 'milestone' to mark a row as a milestone (diamond icon, used for project-level outcomes); 'default_task' converts back to a standard task. Mutation preserves gid, custom fields, subtasks, stories, and project membership."
+          "Approval decision, for tasks with resource_subtype 'approval'. Kept in sync with completed — approved/rejected/changes_requested all mark it complete."
+        ),
+      custom_fields: z.record(z.string(), z.unknown()).optional().describe("Custom field GID→value map"),
+      resource_subtype: z
+        .enum(["default_task", "milestone", "approval"])
+        .optional()
+        .describe(
+          "Convert between task subtypes. Pass 'milestone' to mark a row as a milestone (diamond icon, used for project-level outcomes); 'approval' for an approve/reject task; 'default_task' converts back to a standard task. Mutation preserves gid, custom fields, subtasks, stories, and project membership."
         ),
     },
-    withErrorHandling(async ({ task_id, ...updates }) => {
+    withErrorHandling(async ({ task_id, due_on, due_at, start_on, start_at, ...rest }) => {
+      assertMutuallyExclusive({ due_on, due_at, start_on, start_at }, [
+        ["due_on", "due_at"],
+        ["start_on", "start_at"],
+      ]);
+
+      const updates: Record<string, unknown> = { ...rest };
+      if (due_on !== undefined) updates.due_on = clearNullSentinel(due_on);
+      if (due_at !== undefined) updates.due_at = clearNullSentinel(due_at);
+      if (start_on !== undefined) updates.start_on = clearNullSentinel(start_on);
+      if (start_at !== undefined) updates.start_at = clearNullSentinel(start_at);
+
       const res = await tasks().updateTask({ data: updates }, task_id);
       return textResult(res.data);
     })
@@ -241,10 +313,19 @@ export function registerTasksTools(
       parent_task_id: z.string().describe("Parent task GID"),
       name: z.string().describe("Subtask name"),
       notes: z.string().optional().describe("Subtask description"),
-      due_on: z.string().optional().describe("Due date (YYYY-MM-DD)"),
+      html_notes: z.string().optional().describe("HTML-formatted subtask description"),
+      due_on: dateField().optional().describe("Due date (YYYY-MM-DD). Mutually exclusive with due_at."),
+      due_at: datetimeField()
+        .optional()
+        .describe("Due date and time, ISO 8601 UTC. Mutually exclusive with due_on."),
       assignee: z.string().optional().describe("Assignee GID or 'me'"),
+      resource_subtype: z
+        .enum(["default_task", "milestone", "approval"])
+        .optional()
+        .describe("Subtask subtype — see asana_create_task for details. Mutable via asana_update_task."),
     },
     withErrorHandling(async ({ parent_task_id, ...taskData }) => {
+      assertMutuallyExclusive(taskData, [["due_on", "due_at"]]);
       const res = await tasks().createSubtaskForTask({ data: taskData }, parent_task_id);
       return textResult(res.data);
     })
