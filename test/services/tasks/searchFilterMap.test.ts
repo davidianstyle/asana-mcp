@@ -96,4 +96,74 @@ describe("mapSearchFilterParams", () => {
   it("returns an empty object when given an empty object", () => {
     expect(mapSearchFilterParams({})).toEqual({});
   });
+
+  it("renames assignee_not to assignee.not", () => {
+    expect(mapSearchFilterParams({ assignee_not: "12345" })).toEqual({
+      "assignee.not": "12345",
+    });
+  });
+
+  it("renames start_on_before and start_on_after to dot notation", () => {
+    expect(
+      mapSearchFilterParams({ start_on_before: "2026-01-01", start_on_after: "2025-01-01" })
+    ).toEqual({
+      "start_on.before": "2026-01-01",
+      "start_on.after": "2025-01-01",
+    });
+  });
+
+  it("passes through is_blocked, is_blocking, is_subtask, has_attachment, resource_subtype unchanged", () => {
+    expect(
+      mapSearchFilterParams({
+        is_blocked: true,
+        is_blocking: false,
+        is_subtask: true,
+        has_attachment: false,
+        resource_subtype: "milestone",
+      })
+    ).toEqual({
+      is_blocked: true,
+      is_blocking: false,
+      is_subtask: true,
+      has_attachment: false,
+      resource_subtype: "milestone",
+    });
+  });
+
+  it("flattens a custom_fields passthrough object into custom_fields.<gid>.<query> keys", () => {
+    expect(
+      mapSearchFilterParams({
+        custom_fields: { "12345.value": "67890", "999.is_set": true },
+      })
+    ).toEqual({
+      "custom_fields.12345.value": "67890",
+      "custom_fields.999.is_set": true,
+    });
+  });
+
+  it("drops undefined-valued entries inside the custom_fields object", () => {
+    expect(
+      mapSearchFilterParams({ custom_fields: { "12345.value": undefined, "999.is_set": true } })
+    ).toEqual({ "custom_fields.999.is_set": true });
+  });
+
+  it("omits the custom_fields key entirely when it flattens to nothing", () => {
+    expect(mapSearchFilterParams({ custom_fields: {}, text: "hi" })).toEqual({ text: "hi" });
+  });
+
+  it("handles custom_fields alongside other filters in one call", () => {
+    expect(
+      mapSearchFilterParams({
+        text: "launch",
+        assignee_not: "me",
+        is_blocked: true,
+        custom_fields: { "111.value": "abc" },
+      })
+    ).toEqual({
+      text: "launch",
+      "assignee.not": "me",
+      is_blocked: true,
+      "custom_fields.111.value": "abc",
+    });
+  });
 });

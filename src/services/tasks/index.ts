@@ -53,15 +53,32 @@ export function registerTasksTools(
       workspace: z.string().describe("Workspace GID"),
       text: z.string().optional().describe("Full-text search query"),
       assignee_any: z.string().optional().describe("Comma-separated user GIDs or 'me'"),
+      assignee_not: z.string().optional().describe("Comma-separated user GIDs or 'me' to exclude"),
       due_on_before: z.string().optional().describe("Due date upper bound (YYYY-MM-DD)"),
       due_on_after: z.string().optional().describe("Due date lower bound (YYYY-MM-DD)"),
       due_on: z.string().optional().describe("Exact due date (YYYY-MM-DD)"),
+      start_on_before: z.string().optional().describe("Start date upper bound (YYYY-MM-DD)"),
+      start_on_after: z.string().optional().describe("Start date lower bound (YYYY-MM-DD)"),
       completed: z.boolean().optional().describe("Filter by completion status"),
       completed_on: z.string().optional().describe("Completed on date (YYYY-MM-DD)"),
       modified_on_after: z.string().optional().describe("Modified after (YYYY-MM-DD)"),
       projects_any: z.string().optional().describe("Comma-separated project GIDs"),
       sections_any: z.string().optional().describe("Comma-separated section GIDs"),
       tags_any: z.string().optional().describe("Comma-separated tag GIDs"),
+      is_blocked: z.boolean().optional().describe("Filter to tasks with incomplete dependencies"),
+      is_blocking: z.boolean().optional().describe("Filter to incomplete tasks with dependents"),
+      is_subtask: z.boolean().optional().describe("Filter to subtasks"),
+      has_attachment: z.boolean().optional().describe("Filter to tasks with attachments"),
+      resource_subtype: z
+        .enum(["default_task", "milestone", "approval"])
+        .optional()
+        .describe("Filter by the task's resource_subtype"),
+      custom_fields: z
+        .record(z.string(), z.unknown())
+        .optional()
+        .describe(
+          'Custom field filter passthrough — keys are "<gid>.<query>" (e.g. "<gid>.value", "<gid>.is_set", "<gid>.starts_with", "<gid>.contains", "<gid>.less_than", "<gid>.greater_than", per field type), e.g. {"12345.value": "67890", "999.is_set": true}. See Asana\'s task search docs for the full custom field parameter table.'
+        ),
       sort_by: z.enum(["due_date", "created_at", "completed_at", "modified_at"]).optional().describe("Sort field"),
       sort_ascending: z.boolean().optional().describe("Sort direction"),
       limit: z
