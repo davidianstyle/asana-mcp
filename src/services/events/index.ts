@@ -30,7 +30,7 @@ export function registerEventsTools(server: McpServer, ctx: ServiceContext): voi
       const opts: { sync?: string; opt_fields: string[] } = {
         opt_fields: parseOptFields(
           opt_fields,
-          "action,type,created_at,resource.name,resource.resource_type,parent.name,user.name"
+          "action,created_at,resource.name,resource.resource_type,parent.name,user.name"
         ),
       };
       if (sync_token) opts.sync = sync_token;

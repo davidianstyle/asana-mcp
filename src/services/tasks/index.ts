@@ -77,7 +77,7 @@ export function registerTasksTools(
         .record(z.string(), z.unknown())
         .optional()
         .describe(
-          'Custom field filter passthrough — keys are "<gid>.<query>" (e.g. "<gid>.value", "<gid>.is_set", "<gid>.starts_with", "<gid>.contains", "<gid>.less_than", "<gid>.greater_than", per field type), e.g. {"12345.value": "67890", "999.is_set": true}. See Asana\'s task search docs for the full custom field parameter table.'
+          'Custom field filter passthrough — keys are "<gid>.<query>" (e.g. "<gid>.value", "<gid>.is_set", "<gid>.starts_with", "<gid>.ends_with", "<gid>.contains", "<gid>.less_than", "<gid>.greater_than", per field type), e.g. {"12345.value": "67890", "999.is_set": true}. See Asana\'s task search docs for the full custom field parameter table.'
         ),
       sort_by: z.enum(["due_date", "created_at", "completed_at", "modified_at"]).optional().describe("Sort field"),
       sort_ascending: z.boolean().optional().describe("Sort direction"),
