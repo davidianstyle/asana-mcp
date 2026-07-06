@@ -84,6 +84,13 @@ export interface TaskBatchUpdateInput {
  *    Asana has no "move to section" field on the task PUT body itself,
  *    section membership is its own endpoint (mirrors `asana_add_task_to_section`).
  * An entry with neither produces no actions.
+ *
+ * Asana documents `/batch` actions as executing in parallel with no ordering
+ * guarantee between them ("There is no guarantee of the execution order for
+ * these actions" — developers.asana.com/docs/batch-requests). That's safe
+ * here: the PUT touches task fields (name, dates, completed, assignee, ...)
+ * and the POST touches project/section membership — disjoint aspects of the
+ * task with no read-modify-write overlap between the two actions.
  */
 export function buildTaskUpdateActions(update: TaskBatchUpdateInput): TaskUpdatePlan[] {
   const { task_id, section_id, insert_before, insert_after, ...rest } = update;
