@@ -3,7 +3,7 @@ import Asana from "asana";
 import { z } from "zod";
 import { ServiceContext } from "../../types.js";
 import { textResult } from "../../utils/formatting.js";
-import { withErrorHandling } from "../../utils/errors.js";
+import { withErrorHandling, extractAsanaError } from "../../utils/errors.js";
 import { parseOptFields } from "../../utils/optFields.js";
 import { limitParam, offsetParam, paginationOpts, pagedResult } from "../../utils/pagination.js";
 import { mapSearchFilterParams } from "./searchFilterMap.js";
@@ -12,9 +12,9 @@ import {
   datetimeField,
   nullableDateField,
   nullableDatetimeField,
-  clearNullSentinel,
   assertMutuallyExclusive,
   assertExactlyOneOf,
+  normalizeAndValidateDateFields,
 } from "./validation.js";
 import {
   chunk,
@@ -23,7 +23,7 @@ import {
   batchActionErrorMessage,
   buildGetTaskAction,
   buildTaskUpdateActions,
-  assembleBatchUpdateResults,
+  executeBatchUpdate,
   BatchActionResult,
   TaskBatchUpdateInput,
 } from "./batch.js";
@@ -125,7 +125,15 @@ export function registerTasksTools(
         idChunks.map(async (ids) => {
           const actions = ids.map((id) => buildGetTaskAction(id, fields));
           const res = await batchApi().createBatchRequest({ data: { actions } });
-          return (res.data ?? []) as BatchActionResult[];
+          const results = (res.data ?? []) as BatchActionResult[];
+          if (results.length !== actions.length) {
+            // Results are attributed to GIDs positionally — a count mismatch
+            // must fail loudly rather than silently mislabel tasks.
+            throw new Error(
+              `Asana /batch returned ${results.length} result(s) for ${actions.length} submitted action(s) — cannot attribute results to task GIDs.`
+            );
+          }
+          return results;
         })
       );
       const results = chunkResults.flat();
@@ -146,7 +154,7 @@ export function registerTasksTools(
 
   server.tool(
     "asana_batch_update_tasks",
-    "Bulk-update up to 50 tasks in one round trip (complete, reassign, change dates, move between sections) via Asana's Batch API. Each update becomes one or two batch actions (a field PUT and/or a section-move POST), chunked into requests of up to 10 actions. Returns per-action success/error results in the same order as `updates`.",
+    "Bulk-update up to 50 tasks in one round trip (complete, reassign, change dates, move between sections) via Asana's Batch API. Each update becomes one or two batch actions (a field PUT and/or a section-move POST), chunked into requests of up to 10 actions. Returns per-action success/error results in the same order as `updates`. If one chunk's request fails outright (e.g. rate limit), its tasks are reported with chunk_request_failed (status unknown — verify before retrying) while other chunks' results are preserved.",
     {
       updates: z
         .array(
@@ -186,47 +194,39 @@ export function registerTasksTools(
         ),
     },
     withErrorHandling(async ({ updates }) => {
-      for (const update of updates) {
-        assertMutuallyExclusive(update, [
-          ["due_on", "due_at"],
-          ["start_on", "start_at"],
-        ]);
-      }
-
+      // All validation happens here, before any batch request is submitted.
+      // Dates are normalized ("null" → null) BEFORE the exclusivity check so
+      // clearing one sibling while setting the other (date↔datetime switch)
+      // is accepted — see normalizeAndValidateDateFields.
       const groups = updates.map((update) => {
         const { task_id, section_id, insert_before, insert_after, due_on, due_at, start_on, start_at, ...rest } =
           update;
+        const dates = normalizeAndValidateDateFields({ due_on, due_at, start_on, start_at });
         const normalized: TaskBatchUpdateInput = {
           task_id,
           section_id,
           insert_before,
           insert_after,
           ...rest,
-          ...(due_on !== undefined ? { due_on: clearNullSentinel(due_on) } : {}),
-          ...(due_at !== undefined ? { due_at: clearNullSentinel(due_at) } : {}),
-          ...(start_on !== undefined ? { start_on: clearNullSentinel(start_on) } : {}),
-          ...(start_at !== undefined ? { start_at: clearNullSentinel(start_at) } : {}),
+          ...dates,
         };
         return { task_id, plans: buildTaskUpdateActions(normalized) };
       });
 
-      const flatPlans = groups.flatMap((g) => g.plans);
-      if (flatPlans.length === 0) {
-        return textResult({ results: assembleBatchUpdateResults(groups, []) });
-      }
-
-      const planChunks = chunk(flatPlans, MAX_BATCH_ACTIONS);
-      const chunkResults = await Promise.all(
-        planChunks.map(async (planChunk) => {
-          const res = await batchApi().createBatchRequest({
-            data: { actions: planChunk.map((p) => p.action) },
-          });
+      // Chunk failures are isolated per chunk (not thrown): each affected
+      // task is reported with chunk_request_failed instead, so one rate-limited
+      // or 5xx'd /batch call can't discard the results of mutations that other
+      // chunks already applied — see executeBatchUpdate.
+      const results = await executeBatchUpdate(groups, async (actions) => {
+        try {
+          const res = await batchApi().createBatchRequest({ data: { actions } });
           return (res.data ?? []) as BatchActionResult[];
-        })
-      );
-      const flatResults = chunkResults.flat();
+        } catch (e) {
+          throw new Error(extractAsanaError(e).message);
+        }
+      });
 
-      return textResult({ results: assembleBatchUpdateResults(groups, flatResults) });
+      return textResult({ results });
     })
   );
 
@@ -395,18 +395,11 @@ export function registerTasksTools(
         ),
     },
     withErrorHandling(async ({ task_id, due_on, due_at, start_on, start_at, ...rest }) => {
-      assertMutuallyExclusive({ due_on, due_at, start_on, start_at }, [
-        ["due_on", "due_at"],
-        ["start_on", "start_at"],
-      ]);
-
-      const updates: Record<string, unknown> = { ...rest };
-      if (due_on !== undefined) updates.due_on = clearNullSentinel(due_on);
-      if (due_at !== undefined) updates.due_at = clearNullSentinel(due_at);
-      if (start_on !== undefined) updates.start_on = clearNullSentinel(start_on);
-      if (start_at !== undefined) updates.start_at = clearNullSentinel(start_at);
-
-      const res = await tasks().updateTask({ data: updates }, task_id);
+      // Normalizes "null" → null BEFORE the mutual-exclusivity check, so
+      // clearing one sibling while setting the other (e.g. due_on: "null" +
+      // due_at: <datetime>, a date→datetime switch) is accepted.
+      const dates = normalizeAndValidateDateFields({ due_on, due_at, start_on, start_at });
+      const res = await tasks().updateTask({ data: { ...rest, ...dates } }, task_id);
       return textResult(res.data);
     })
   );

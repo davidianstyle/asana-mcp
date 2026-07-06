@@ -132,7 +132,15 @@ export interface BatchActionReport {
   kind: "update" | "move_section";
   success: boolean;
   data?: unknown;
+  /** Per-action Asana error (the /batch call itself succeeded, this action returned non-2xx). */
   error?: string;
+  /**
+   * Set when the whole /batch HTTP request carrying this action failed (rate
+   * limit, 5xx, network) or returned an unattributable result count — the
+   * action's true status is UNKNOWN: it may or may not have been applied.
+   * Verify before retrying.
+   */
+  chunk_request_failed?: string;
 }
 
 export interface TaskBatchUpdateReport {
@@ -141,28 +149,96 @@ export interface TaskBatchUpdateReport {
 }
 
 /**
- * Zips flattened `/batch` results (in submission order) back up against the
+ * Placeholder outcome for an action whose entire /batch request failed —
+ * distinct from a per-action non-2xx result, where Asana did evaluate the
+ * action and reported on it individually.
+ */
+export interface ChunkRequestFailure {
+  chunk_request_failed: string;
+}
+
+export type SettledActionOutcome = BatchActionResult | ChunkRequestFailure;
+
+function isChunkRequestFailure(outcome: SettledActionOutcome): outcome is ChunkRequestFailure {
+  return "chunk_request_failed" in outcome;
+}
+
+/**
+ * Zips flattened `/batch` outcomes (in submission order) back up against the
  * plan groups they came from, producing one report entry per input update —
  * in the same order and count as the original `updates` array, even for a
- * group with zero actions.
+ * group with zero actions. Throws loudly if the outcome count doesn't match
+ * the submitted action count, since positional zipping would otherwise
+ * silently attribute results to the wrong task GIDs.
  */
 export function assembleBatchUpdateResults(
   groups: readonly TaskUpdatePlanGroup[],
-  results: readonly BatchActionResult[]
+  results: readonly SettledActionOutcome[]
 ): TaskBatchUpdateReport[] {
+  const submitted = groups.reduce((n, g) => n + g.plans.length, 0);
+  if (results.length !== submitted) {
+    throw new Error(
+      `Batch result count mismatch: ${submitted} action(s) submitted but ${results.length} result(s) returned — refusing to attribute results to tasks.`
+    );
+  }
   let cursor = 0;
   return groups.map(({ task_id, plans }) => ({
     task_id,
     actions: plans.map((plan) => {
-      const result = results[cursor++];
-      const ok = isBatchActionSuccess(result);
+      const outcome = results[cursor++];
+      if (isChunkRequestFailure(outcome)) {
+        return {
+          kind: plan.kind,
+          success: false,
+          chunk_request_failed: outcome.chunk_request_failed,
+        };
+      }
+      const ok = isBatchActionSuccess(outcome);
       return {
         kind: plan.kind,
         success: ok,
         ...(ok
-          ? { data: (result.body as { data?: unknown } | undefined)?.data }
-          : { error: batchActionErrorMessage(result.body) }),
+          ? { data: (outcome.body as { data?: unknown } | undefined)?.data }
+          : { error: batchActionErrorMessage(outcome.body) }),
       };
     }),
   }));
+}
+
+/**
+ * Runs a bulk task update end-to-end: flattens the plan groups, chunks them
+ * to `MAX_BATCH_ACTIONS` per /batch call, submits chunks in parallel via
+ * `submitBatch`, and zips the outcomes back into per-task reports.
+ *
+ * Chunk failures are isolated, not fatal: if one chunk's HTTP request rejects
+ * (rate limit, 5xx) or returns an unattributable result count, only that
+ * chunk's actions are reported as `chunk_request_failed` (status unknown —
+ * Asana may have already applied some of them); every other chunk's per-action
+ * results are preserved. This matters because /batch chunks are independent
+ * mutations — throwing away the whole report over one failed chunk would
+ * invite blind retries of updates that already went through.
+ */
+export async function executeBatchUpdate(
+  groups: readonly TaskUpdatePlanGroup[],
+  submitBatch: (actions: BatchAction[]) => Promise<BatchActionResult[]>
+): Promise<TaskBatchUpdateReport[]> {
+  const flatPlans = groups.flatMap((g) => g.plans);
+  const planChunks = chunk(flatPlans, MAX_BATCH_ACTIONS);
+  const outcomeChunks = await Promise.all(
+    planChunks.map(async (planChunk): Promise<SettledActionOutcome[]> => {
+      try {
+        const results = await submitBatch(planChunk.map((p) => p.action));
+        if (results.length !== planChunk.length) {
+          throw new Error(
+            `Asana /batch returned ${results.length} result(s) for ${planChunk.length} action(s) — cannot attribute results.`
+          );
+        }
+        return results;
+      } catch (e) {
+        const message = e instanceof Error ? e.message : String(e);
+        return planChunk.map(() => ({ chunk_request_failed: message }));
+      }
+    })
+  );
+  return assembleBatchUpdateResults(groups, outcomeChunks.flat());
 }

@@ -7,6 +7,10 @@ import {
   buildGetTaskAction,
   buildTaskUpdateActions,
   assembleBatchUpdateResults,
+  executeBatchUpdate,
+  BatchAction,
+  BatchActionResult,
+  TaskUpdatePlanGroup,
 } from "../../../src/services/tasks/batch.js";
 
 describe("chunk", () => {
@@ -222,5 +226,121 @@ describe("assembleBatchUpdateResults", () => {
         ],
       },
     ]);
+  });
+});
+
+describe("assembleBatchUpdateResults (count assertion + chunk failures)", () => {
+  const oneUpdateGroup = (taskId: string): TaskUpdatePlanGroup => ({
+    task_id: taskId,
+    plans: [
+      {
+        task_id: taskId,
+        kind: "update" as const,
+        action: { relative_path: `/tasks/${taskId}`, method: "put" as const, data: {} },
+      },
+    ],
+  });
+
+  it("throws a loud error when the result count does not match the submitted action count", () => {
+    expect(() => assembleBatchUpdateResults([oneUpdateGroup("1")], [])).toThrow(
+      /1 action.*0 result|mismatch/i
+    );
+    expect(() =>
+      assembleBatchUpdateResults(
+        [oneUpdateGroup("1")],
+        [
+          { status_code: 200, body: {} },
+          { status_code: 200, body: {} },
+        ]
+      )
+    ).toThrow(/1 action.*2 result|mismatch/i);
+  });
+
+  it("maps a chunk_request_failed outcome to a failed action report carrying the error", () => {
+    expect(
+      assembleBatchUpdateResults(
+        [oneUpdateGroup("1")],
+        [{ chunk_request_failed: "rate limited" }]
+      )
+    ).toEqual([
+      {
+        task_id: "1",
+        actions: [{ kind: "update", success: false, chunk_request_failed: "rate limited" }],
+      },
+    ]);
+  });
+});
+
+describe("executeBatchUpdate", () => {
+  const makeGroups = (n: number): TaskUpdatePlanGroup[] =>
+    Array.from({ length: n }, (_, i) => ({
+      task_id: String(i + 1),
+      plans: [
+        {
+          task_id: String(i + 1),
+          kind: "update" as const,
+          action: {
+            relative_path: `/tasks/${i + 1}`,
+            method: "put" as const,
+            data: { completed: true },
+          },
+        },
+      ],
+    }));
+
+  const okResults = (actions: BatchAction[]): BatchActionResult[] =>
+    actions.map(() => ({ status_code: 200, body: { data: { gid: "ok" } } }));
+
+  it("submits one batch call per chunk of 10 actions", async () => {
+    const calls: BatchAction[][] = [];
+    await executeBatchUpdate(makeGroups(12), async (actions) => {
+      calls.push(actions);
+      return okResults(actions);
+    });
+    expect(calls.map((c) => c.length)).toEqual([10, 2]);
+  });
+
+  it("makes no batch calls and returns empty-action reports when no update has any actions", async () => {
+    const calls: BatchAction[][] = [];
+    const report = await executeBatchUpdate(
+      [{ task_id: "1", plans: [] }],
+      async (actions) => {
+        calls.push(actions);
+        return okResults(actions);
+      }
+    );
+    expect(calls).toEqual([]);
+    expect(report).toEqual([{ task_id: "1", actions: [] }]);
+  });
+
+  it("preserves successful chunks' per-action results when another chunk's request rejects", async () => {
+    let call = 0;
+    const report = await executeBatchUpdate(makeGroups(12), async (actions) => {
+      call++;
+      if (call === 2) throw new Error("Rate limit exceeded");
+      return okResults(actions);
+    });
+
+    expect(report).toHaveLength(12);
+    for (const entry of report.slice(0, 10)) {
+      expect(entry.actions).toEqual([{ kind: "update", success: true, data: { gid: "ok" } }]);
+    }
+    for (const entry of report.slice(10)) {
+      expect(entry.actions).toEqual([
+        { kind: "update", success: false, chunk_request_failed: "Rate limit exceeded" },
+      ]);
+    }
+  });
+
+  it("treats a chunk whose result count mismatches its action count as a failed chunk (statuses unknown), not misattributed", async () => {
+    const report = await executeBatchUpdate(makeGroups(2), async () => [
+      { status_code: 200, body: { data: { gid: "only-one" } } },
+    ]);
+    expect(report).toHaveLength(2);
+    for (const entry of report) {
+      expect(entry.actions[0].success).toBe(false);
+      expect(entry.actions[0].chunk_request_failed).toMatch(/1 result.*2 action/);
+      expect(entry.actions[0].data).toBeUndefined();
+    }
   });
 });

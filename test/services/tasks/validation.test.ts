@@ -9,6 +9,7 @@ import {
   clearNullSentinel,
   assertMutuallyExclusive,
   assertExactlyOneOf,
+  normalizeAndValidateDateFields,
 } from "../../../src/services/tasks/validation.js";
 
 describe("DATE_REGEX", () => {
@@ -199,5 +200,45 @@ describe("assertExactlyOneOf", () => {
         ["project_id", "workspace"]
       )
     ).toThrow();
+  });
+});
+
+describe("normalizeAndValidateDateFields", () => {
+  it('allows clearing due_on with the string "null" while setting due_at (date→datetime switch), producing a real null', () => {
+    expect(
+      normalizeAndValidateDateFields({ due_on: "null", due_at: "2026-01-15T09:00:00Z" })
+    ).toEqual({ due_on: null, due_at: "2026-01-15T09:00:00Z" });
+  });
+
+  it("allows clearing due_at with a real null while setting due_on (datetime→date switch)", () => {
+    expect(
+      normalizeAndValidateDateFields({ due_at: null, due_on: "2026-01-15" })
+    ).toEqual({ due_at: null, due_on: "2026-01-15" });
+  });
+
+  it('allows clearing start_on with "null" while setting start_at', () => {
+    expect(
+      normalizeAndValidateDateFields({ start_on: "null", start_at: "2026-01-15T09:00:00Z" })
+    ).toEqual({ start_on: null, start_at: "2026-01-15T09:00:00Z" });
+  });
+
+  it("still throws naming both params when both siblings hold live values", () => {
+    expect(() =>
+      normalizeAndValidateDateFields({ due_on: "2026-01-15", due_at: "2026-01-15T09:00:00Z" })
+    ).toThrow(/due_on.*due_at|due_at.*due_on/);
+    expect(() =>
+      normalizeAndValidateDateFields({ start_on: "2026-01-15", start_at: "2026-01-15T09:00:00Z" })
+    ).toThrow(/start_on.*start_at|start_at.*start_on/);
+  });
+
+  it("omits undefined fields from the result (so untouched fields stay out of the request body)", () => {
+    expect(normalizeAndValidateDateFields({ due_on: "2026-01-15" })).toEqual({
+      due_on: "2026-01-15",
+    });
+    expect(normalizeAndValidateDateFields({})).toEqual({});
+  });
+
+  it('folds a lone "null" into a real null even with no sibling set', () => {
+    expect(normalizeAndValidateDateFields({ due_at: "null" })).toEqual({ due_at: null });
   });
 });

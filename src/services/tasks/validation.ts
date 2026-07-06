@@ -59,6 +59,12 @@ export function clearNullSentinel(
  * pair both hold a real (string) value. A `null` (clearing) or `undefined`
  * (untouched) value never conflicts with its sibling — only two live string
  * values do.
+ *
+ * NOTE: this low-level check treats ANY string as live — including the
+ * `"null"` clearing sentinel accepted by `nullableDateField` /
+ * `nullableDatetimeField`. Callers handling clearable fields must normalize
+ * via `clearNullSentinel` BEFORE asserting (use
+ * `normalizeAndValidateDateFields`, which does both in the right order).
  */
 export function assertMutuallyExclusive(
   fields: Record<string, unknown>,
@@ -71,6 +77,42 @@ export function assertMutuallyExclusive(
       );
     }
   }
+}
+
+/** The four clearable scheduling fields shared by update-style task calls. */
+export interface DateFields {
+  due_on?: string | null;
+  due_at?: string | null;
+  start_on?: string | null;
+  start_at?: string | null;
+}
+
+const DATE_FIELD_KEYS = ["due_on", "due_at", "start_on", "start_at"] as const;
+
+const DATE_SIBLING_PAIRS = [
+  ["due_on", "due_at"],
+  ["start_on", "start_at"],
+] as const;
+
+/**
+ * Folds each date field's `"null"` sentinel into a real `null`, then enforces
+ * due_on/due_at and start_on/start_at mutual exclusivity on the NORMALIZED
+ * values. Ordering matters: normalizing first means clearing one sibling
+ * (with `null` or `"null"`) while setting the other — e.g. switching a task
+ * from date to datetime scheduling in one call — passes validation, whereas
+ * asserting on raw values would see the `"null"` string as a live value and
+ * throw a spurious exclusivity error. Returns only the fields that were
+ * provided (`undefined` entries are omitted), ready to spread into a request
+ * body without touching unspecified fields.
+ */
+export function normalizeAndValidateDateFields(fields: DateFields): DateFields {
+  const normalized: DateFields = {};
+  for (const key of DATE_FIELD_KEYS) {
+    const value = fields[key];
+    if (value !== undefined) normalized[key] = clearNullSentinel(value);
+  }
+  assertMutuallyExclusive({ ...normalized }, DATE_SIBLING_PAIRS);
+  return normalized;
 }
 
 /**
