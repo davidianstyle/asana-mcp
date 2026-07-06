@@ -3,6 +3,18 @@ import Asana from "asana";
 import { z } from "zod";
 import { ServiceContext } from "../../types.js";
 import { textResult } from "../../utils/formatting.js";
+import { withErrorHandling } from "../../utils/errors.js";
+import { parseOptFields } from "../../utils/optFields.js";
+import { limitParam, offsetParam, paginationOpts, pagedResult } from "../../utils/pagination.js";
+import { mapSearchFilterParams } from "./searchFilterMap.js";
+
+// The generated .d.ts for searchTasksForWorkspace omits `limit` even though Asana's
+// docs ("Page sizes are limited to a maximum of 100 items, and can be specified by
+// the limit query parameter") and the JS implementation (queryParams = opts, spread
+// through verbatim — see node_modules/asana/src/api/TasksApi.js) both support it.
+type SearchTasksOpts = NonNullable<
+  Parameters<InstanceType<typeof Asana.TasksApi>["searchTasksForWorkspace"]>[1]
+>;
 
 export function registerTasksTools(
   server: McpServer,
@@ -29,16 +41,30 @@ export function registerTasksTools(
       tags_any: z.string().optional().describe("Comma-separated tag GIDs"),
       sort_by: z.enum(["due_date", "created_at", "completed_at", "modified_at"]).optional().describe("Sort field"),
       sort_ascending: z.boolean().optional().describe("Sort direction"),
+      limit: z
+        .number()
+        .int()
+        .min(1)
+        .max(100)
+        .optional()
+        .describe(
+          "Max results (1-100). Asana caps search results at 100 server-side and does not support traditional offset pagination for this endpoint — re-run with a narrower filter (e.g. modified_on_after) to see more."
+        ),
       opt_fields: z.string().optional().describe("Comma-separated fields to include"),
     },
-    async (params) => {
-      const { workspace, opt_fields, ...searchOpts } = params;
-      const res = await tasks().searchTasksForWorkspace(workspace, {
-        ...searchOpts,
-        opt_fields: (opt_fields || "name,due_on,completed,assignee.name,projects.name,permalink_url").split(","),
-      });
+    withErrorHandling(async (params) => {
+      const { workspace, opt_fields, limit, ...filterParams } = params;
+      const searchQuery: SearchTasksOpts & { limit?: number } = {
+        ...mapSearchFilterParams(filterParams),
+        opt_fields: parseOptFields(
+          opt_fields,
+          "name,due_on,completed,assignee.name,projects.name,permalink_url,resource_subtype,num_subtasks,parent.name"
+        ),
+      };
+      if (limit !== undefined) searchQuery.limit = limit;
+      const res = await tasks().searchTasksForWorkspace(workspace, searchQuery);
       return textResult(res.data);
-    }
+    })
   );
 
   server.tool(
@@ -48,12 +74,15 @@ export function registerTasksTools(
       task_id: z.string().describe("Task GID"),
       opt_fields: z.string().optional().describe("Comma-separated fields to include"),
     },
-    async ({ task_id, opt_fields }) => {
+    withErrorHandling(async ({ task_id, opt_fields }) => {
       const res = await tasks().getTask(task_id, {
-        opt_fields: (opt_fields || "name,notes,due_on,due_at,completed,assignee.name,projects.name,tags.name,custom_fields,permalink_url,parent.name,num_subtasks").split(","),
+        opt_fields: parseOptFields(
+          opt_fields,
+          "name,notes,due_on,due_at,completed,assignee.name,projects.name,tags.name,custom_fields.name,custom_fields.display_value,permalink_url,parent.name,num_subtasks"
+        ),
       });
       return textResult(res.data);
-    }
+    })
   );
 
   server.tool(
@@ -63,13 +92,16 @@ export function registerTasksTools(
       task_ids: z.array(z.string()).max(25).describe("Array of task GIDs (max 25)"),
       opt_fields: z.string().optional().describe("Comma-separated fields to include"),
     },
-    async ({ task_ids, opt_fields }) => {
-      const fields = (opt_fields || "name,due_on,completed,assignee.name,projects.name,permalink_url").split(",");
+    withErrorHandling(async ({ task_ids, opt_fields }) => {
+      const fields = parseOptFields(
+        opt_fields,
+        "name,due_on,completed,assignee.name,projects.name,permalink_url,resource_subtype,num_subtasks,parent.name"
+      );
       const results = await Promise.all(
         task_ids.map((id) => tasks().getTask(id, { opt_fields: fields }).then((r) => r.data))
       );
       return textResult(results);
-    }
+    })
   );
 
   server.tool(
@@ -78,17 +110,23 @@ export function registerTasksTools(
     {
       workspace: z.string().describe("Workspace GID"),
       completed_since: z.string().optional().describe("Only incomplete tasks or tasks completed since this date ('now' for incomplete only)"),
+      limit: limitParam,
+      offset: offsetParam,
       opt_fields: z.string().optional().describe("Comma-separated fields to include"),
     },
-    async ({ workspace, completed_since, opt_fields }) => {
+    withErrorHandling(async ({ workspace, completed_since, limit, offset, opt_fields }) => {
       const res = await tasks().getTasks({
         workspace,
         assignee: "me",
         completed_since: completed_since || "now",
-        opt_fields: (opt_fields || "name,due_on,due_at,completed,projects.name,permalink_url").split(","),
+        ...paginationOpts(limit, offset),
+        opt_fields: parseOptFields(
+          opt_fields,
+          "name,due_on,due_at,completed,projects.name,permalink_url,resource_subtype,num_subtasks,parent.name"
+        ),
       });
-      return textResult(res.data);
-    }
+      return textResult(pagedResult(res));
+    })
   );
 
   server.tool(
@@ -96,14 +134,20 @@ export function registerTasksTools(
     "Get tasks in a project",
     {
       project_id: z.string().describe("Project GID"),
+      limit: limitParam,
+      offset: offsetParam,
       opt_fields: z.string().optional().describe("Comma-separated fields to include"),
     },
-    async ({ project_id, opt_fields }) => {
+    withErrorHandling(async ({ project_id, limit, offset, opt_fields }) => {
       const res = await tasks().getTasksForProject(project_id, {
-        opt_fields: (opt_fields || "name,due_on,completed,assignee.name,permalink_url").split(","),
+        ...paginationOpts(limit, offset),
+        opt_fields: parseOptFields(
+          opt_fields,
+          "name,due_on,completed,assignee.name,permalink_url,resource_subtype,num_subtasks,parent.name,memberships.section.name"
+        ),
       });
-      return textResult(res.data);
-    }
+      return textResult(pagedResult(res));
+    })
   );
 
   server.tool(
@@ -111,14 +155,20 @@ export function registerTasksTools(
     "Get tasks with a specific tag",
     {
       tag_id: z.string().describe("Tag GID"),
+      limit: limitParam,
+      offset: offsetParam,
       opt_fields: z.string().optional().describe("Comma-separated fields to include"),
     },
-    async ({ tag_id, opt_fields }) => {
+    withErrorHandling(async ({ tag_id, limit, offset, opt_fields }) => {
       const res = await tasks().getTasksForTag(tag_id, {
-        opt_fields: (opt_fields || "name,due_on,completed,assignee.name,permalink_url").split(","),
+        ...paginationOpts(limit, offset),
+        opt_fields: parseOptFields(
+          opt_fields,
+          "name,due_on,completed,assignee.name,permalink_url,resource_subtype,num_subtasks,parent.name"
+        ),
       });
-      return textResult(res.data);
-    }
+      return textResult(pagedResult(res));
+    })
   );
 
   server.tool(
@@ -140,11 +190,11 @@ export function registerTasksTools(
           "Task subtype. 'default_task' is the standard unit of work; 'milestone' renders with a diamond icon and is the right call for project-level outcomes. Mutable via asana_update_task."
         ),
     },
-    async ({ project_id, projects: extraProjects, ...taskData }) => {
+    withErrorHandling(async ({ project_id, projects: extraProjects, ...taskData }) => {
       const allProjects = [project_id, ...(extraProjects || [])];
       const res = await tasks().createTask({ data: { ...taskData, projects: allProjects } });
       return textResult(res.data);
-    }
+    })
   );
 
   server.tool(
@@ -166,11 +216,10 @@ export function registerTasksTools(
           "Convert between task subtypes. Pass 'milestone' to mark a row as a milestone (diamond icon, used for project-level outcomes); 'default_task' converts back to a standard task. Mutation preserves gid, custom fields, subtasks, stories, and project membership."
         ),
     },
-    async ({ task_id, ...updates }) => {
-      const api = tasks() as unknown as Record<string, (...args: unknown[]) => Promise<Record<string, unknown>>>;
-      const res = await api.updateTask({ data: updates }, task_id);
+    withErrorHandling(async ({ task_id, ...updates }) => {
+      const res = await tasks().updateTask({ data: updates }, task_id);
       return textResult(res.data);
-    }
+    })
   );
 
   server.tool(
@@ -179,10 +228,10 @@ export function registerTasksTools(
     {
       task_id: z.string().describe("Task GID to delete"),
     },
-    async ({ task_id }) => {
+    withErrorHandling(async ({ task_id }) => {
       await tasks().deleteTask(task_id);
       return textResult({ ok: true, deleted: task_id });
-    }
+    })
   );
 
   server.tool(
@@ -195,10 +244,10 @@ export function registerTasksTools(
       due_on: z.string().optional().describe("Due date (YYYY-MM-DD)"),
       assignee: z.string().optional().describe("Assignee GID or 'me'"),
     },
-    async ({ parent_task_id, ...taskData }) => {
+    withErrorHandling(async ({ parent_task_id, ...taskData }) => {
       const res = await tasks().createSubtaskForTask({ data: taskData }, parent_task_id);
       return textResult(res.data);
-    }
+    })
   );
 
   server.tool(
@@ -206,14 +255,20 @@ export function registerTasksTools(
     "Get subtasks of a task",
     {
       task_id: z.string().describe("Parent task GID"),
+      limit: limitParam,
+      offset: offsetParam,
       opt_fields: z.string().optional().describe("Comma-separated fields to include"),
     },
-    async ({ task_id, opt_fields }) => {
+    withErrorHandling(async ({ task_id, limit, offset, opt_fields }) => {
       const res = await tasks().getSubtasksForTask(task_id, {
-        opt_fields: (opt_fields || "name,due_on,completed,assignee.name").split(","),
+        ...paginationOpts(limit, offset),
+        opt_fields: parseOptFields(
+          opt_fields,
+          "name,due_on,completed,assignee.name,resource_subtype,num_subtasks,parent.name"
+        ),
       });
-      return textResult(res.data);
-    }
+      return textResult(pagedResult(res));
+    })
   );
 
   server.tool(
@@ -223,10 +278,10 @@ export function registerTasksTools(
       task_id: z.string().describe("Task GID"),
       dependencies: z.array(z.string()).describe("GIDs of tasks this depends on"),
     },
-    async ({ task_id, dependencies }) => {
+    withErrorHandling(async ({ task_id, dependencies }) => {
       const res = await tasks().addDependenciesForTask({ data: { dependencies } }, task_id);
       return textResult(res.data);
-    }
+    })
   );
 
   server.tool(
@@ -236,10 +291,10 @@ export function registerTasksTools(
       task_id: z.string().describe("Task GID"),
       dependents: z.array(z.string()).describe("GIDs of tasks that depend on this one"),
     },
-    async ({ task_id, dependents }) => {
+    withErrorHandling(async ({ task_id, dependents }) => {
       const res = await tasks().addDependentsForTask({ data: { dependents } }, task_id);
       return textResult(res.data);
-    }
+    })
   );
 
   server.tool(
@@ -250,10 +305,10 @@ export function registerTasksTools(
       project_id: z.string().describe("Project GID to add the task to"),
       section: z.string().optional().describe("Section GID within the project"),
     },
-    async ({ task_id, project_id, section }) => {
+    withErrorHandling(async ({ task_id, project_id, section }) => {
       await tasks().addProjectForTask({ data: { project: project_id, section } }, task_id);
       return textResult({ ok: true });
-    }
+    })
   );
 
   server.tool(
@@ -263,10 +318,10 @@ export function registerTasksTools(
       task_id: z.string().describe("Task GID"),
       project_id: z.string().describe("Project GID to remove the task from"),
     },
-    async ({ task_id, project_id }) => {
+    withErrorHandling(async ({ task_id, project_id }) => {
       await tasks().removeProjectForTask({ data: { project: project_id } }, task_id);
       return textResult({ ok: true });
-    }
+    })
   );
 
   server.tool(
@@ -276,10 +331,10 @@ export function registerTasksTools(
       task_id: z.string().describe("Task GID"),
       tag_id: z.string().describe("Tag GID to add"),
     },
-    async ({ task_id, tag_id }) => {
+    withErrorHandling(async ({ task_id, tag_id }) => {
       await tasks().addTagForTask({ data: { tag: tag_id } }, task_id);
       return textResult({ ok: true });
-    }
+    })
   );
 
   server.tool(
@@ -289,10 +344,10 @@ export function registerTasksTools(
       task_id: z.string().describe("Task GID"),
       tag_id: z.string().describe("Tag GID to remove"),
     },
-    async ({ task_id, tag_id }) => {
+    withErrorHandling(async ({ task_id, tag_id }) => {
       await tasks().removeTagForTask({ data: { tag: tag_id } }, task_id);
       return textResult({ ok: true });
-    }
+    })
   );
 
   server.tool(
@@ -304,10 +359,10 @@ export function registerTasksTools(
       insert_before: z.string().optional().describe("Task GID to insert before"),
       insert_after: z.string().optional().describe("Task GID to insert after"),
     },
-    async ({ section_id, task_id, insert_before, insert_after }) => {
+    withErrorHandling(async ({ section_id, task_id, insert_before, insert_after }) => {
       await sections().addTaskForSection(section_id, { body: { data: { task: task_id, insert_before, insert_after } } });
       return textResult({ ok: true });
-    }
+    })
   );
 
   server.tool(
@@ -317,10 +372,10 @@ export function registerTasksTools(
       task_id: z.string().describe("Task GID"),
       parent: z.string().describe("New parent task GID (empty string to remove parent)"),
     },
-    async ({ task_id, parent }) => {
+    withErrorHandling(async ({ task_id, parent }) => {
       const res = await tasks().setParentForTask({ data: { parent: parent || null } }, task_id);
       return textResult(res.data);
-    }
+    })
   );
 
   server.tool(
@@ -331,12 +386,12 @@ export function registerTasksTools(
       followers: z.array(z.string()).min(1).describe("User GIDs (or 'me') to add as followers"),
       opt_fields: z.string().optional().describe("Comma-separated fields to include"),
     },
-    async ({ task_id, followers, opt_fields }) => {
+    withErrorHandling(async ({ task_id, followers, opt_fields }) => {
       const res = await tasks().addFollowersForTask({ data: { followers } }, task_id, {
-        opt_fields: (opt_fields || "name,followers.name").split(","),
+        opt_fields: parseOptFields(opt_fields, "name,followers.name"),
       });
       return textResult(res.data);
-    }
+    })
   );
 
   server.tool(
@@ -347,11 +402,11 @@ export function registerTasksTools(
       followers: z.array(z.string()).min(1).describe("User GIDs (or 'me') to remove as followers"),
       opt_fields: z.string().optional().describe("Comma-separated fields to include"),
     },
-    async ({ task_id, followers, opt_fields }) => {
+    withErrorHandling(async ({ task_id, followers, opt_fields }) => {
       const res = await tasks().removeFollowerForTask({ data: { followers } }, task_id, {
-        opt_fields: (opt_fields || "name,followers.name").split(","),
+        opt_fields: parseOptFields(opt_fields, "name,followers.name"),
       });
       return textResult(res.data);
-    }
+    })
   );
 }
