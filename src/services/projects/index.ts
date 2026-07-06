@@ -13,7 +13,12 @@ export function registerProjectsTools(
 ): void {
   const workspaces = () => new Asana.WorkspacesApi(ctx.apiClient);
   const projects = () => new Asana.ProjectsApi(ctx.apiClient);
-  const statuses = () => new Asana.ProjectStatusesApi(ctx.apiClient);
+  // ProjectStatusesApi (/project_statuses) is deprecated in favor of the
+  // unified StatusUpdatesApi (/status_updates?parent=), which also covers
+  // portfolio and goal status updates — see node_modules/asana/src/api/StatusUpdatesApi.d.ts.
+  // Tool names/params below are unchanged (only status_type is new) so existing
+  // callers aren't affected by the backend swap.
+  const statusUpdates = () => new Asana.StatusUpdatesApi(ctx.apiClient);
 
   server.tool(
     "asana_list_workspaces",
@@ -162,7 +167,7 @@ export function registerProjectsTools(
       project_id: z.string().describe("Project GID"),
     },
     withErrorHandling(async ({ project_id }) => {
-      const res = await statuses().getProjectStatusesForProject(project_id, {});
+      const res = await statusUpdates().getStatusesForObject(project_id, {});
       return textResult(res.data);
     })
   );
@@ -174,7 +179,7 @@ export function registerProjectsTools(
       status_id: z.string().describe("Project status GID"),
     },
     withErrorHandling(async ({ status_id }) => {
-      const res = await statuses().getProjectStatus(status_id, {});
+      const res = await statusUpdates().getStatus(status_id, {});
       return textResult(res.data);
     })
   );
@@ -187,9 +192,17 @@ export function registerProjectsTools(
       text: z.string().describe("Status text"),
       color: z.enum(["green", "yellow", "red"]).describe("Status color"),
       title: z.string().optional().describe("Status title"),
+      status_type: z
+        .enum(["on_track", "at_risk", "off_track", "on_hold"])
+        .optional()
+        .describe(
+          "Structured status signal (distinct from color), surfaced in status rollups. Defaults to Asana's own color-derived mapping when omitted."
+        ),
     },
     withErrorHandling(async ({ project_id, ...statusData }) => {
-      const res = await statuses().createProjectStatusForProject({ data: statusData }, project_id);
+      const res = await statusUpdates().createStatusForObject({
+        data: { parent: project_id, ...statusData },
+      });
       return textResult(res.data);
     })
   );
@@ -201,7 +214,7 @@ export function registerProjectsTools(
       status_id: z.string().describe("Project status GID"),
     },
     withErrorHandling(async ({ status_id }) => {
-      await statuses().deleteProjectStatus(status_id);
+      await statusUpdates().deleteStatus(status_id);
       return textResult({ ok: true, deleted: status_id });
     })
   );
