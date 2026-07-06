@@ -1,5 +1,10 @@
 import { describe, it, expect, vi } from "vitest";
-import { isJobTerminal, pollJob, JobLike } from "../../../src/services/tasks/jobs.js";
+import {
+  isJobTerminal,
+  pollJob,
+  startAndPollJob,
+  JobLike,
+} from "../../../src/services/tasks/jobs.js";
 
 describe("isJobTerminal", () => {
   it("treats succeeded and failed as terminal", () => {
@@ -124,5 +129,98 @@ describe("pollJob", () => {
     const getJob = vi.fn().mockResolvedValue({ gid: "j1", status: "succeeded" } as JobLike);
     const result = await pollJob(getJob);
     expect(result).toEqual({ job: { gid: "j1", status: "succeeded" }, timedOut: false });
+  });
+});
+
+describe("startAndPollJob", () => {
+  function fakeClock(start = 0) {
+    let time = start;
+    return {
+      now: () => time,
+      sleep: vi.fn(async (ms: number) => {
+        time += ms;
+      }),
+    };
+  }
+
+  it("calls start exactly once and returns the terminal job when polling succeeds", async () => {
+    const clock = fakeClock();
+    const start = vi.fn().mockResolvedValue({ gid: "j1", status: "in_progress" } as JobLike);
+    const getJob = vi
+      .fn()
+      .mockResolvedValueOnce({ gid: "j1", status: "in_progress" } as JobLike)
+      .mockResolvedValueOnce({ gid: "j1", status: "succeeded" } as JobLike);
+
+    const result = await startAndPollJob(start, getJob, { now: clock.now, sleep: clock.sleep });
+
+    expect(result).toEqual({ job: { gid: "j1", status: "succeeded" }, timedOut: false });
+    expect(start).toHaveBeenCalledTimes(1);
+    expect(getJob).toHaveBeenCalledWith("j1");
+  });
+
+  it("does NOT throw and does NOT re-run start when polling rejects — falls back to the started job's gid", async () => {
+    // This is the whole point of the composition: the tool handler is wrapped
+    // in withErrorHandling, whose 429 handling re-invokes the ENTIRE handler.
+    // If a polling error escaped, the retry would call the mutation (start)
+    // again and create a second duplicate. Swallowing polling errors here
+    // guarantees the mutation runs exactly once per tool call.
+    const clock = fakeClock();
+    const start = vi.fn().mockResolvedValue({ gid: "j1", status: "in_progress" } as JobLike);
+    const getJob = vi.fn().mockRejectedValue(new Error("Rate limit exceeded"));
+
+    const result = await startAndPollJob(start, getJob, { now: clock.now, sleep: clock.sleep });
+
+    expect(start).toHaveBeenCalledTimes(1);
+    expect(result.job.gid).toBe("j1");
+    expect(result.timedOut).toBe(true);
+    expect(result.pollError).toMatch(/Rate limit exceeded/);
+  });
+
+  it("swallows a polling error on a later poll too, still reporting the job gid", async () => {
+    const clock = fakeClock();
+    const start = vi.fn().mockResolvedValue({ gid: "j1", status: "in_progress" } as JobLike);
+    const getJob = vi
+      .fn()
+      .mockResolvedValueOnce({ gid: "j1", status: "in_progress" } as JobLike)
+      .mockRejectedValueOnce(new Error("socket hang up"));
+
+    const result = await startAndPollJob(start, getJob, { now: clock.now, sleep: clock.sleep });
+
+    expect(start).toHaveBeenCalledTimes(1);
+    expect(result).toEqual({
+      job: { gid: "j1", status: "in_progress" },
+      timedOut: true,
+      pollError: "socket hang up",
+    });
+  });
+
+  it("propagates an error from start itself (the mutation was rejected pre-execution, so a retry is safe)", async () => {
+    const clock = fakeClock();
+    const start = vi.fn().mockRejectedValue(new Error("Rate limit exceeded"));
+    const getJob = vi.fn();
+
+    await expect(
+      startAndPollJob(start, getJob, { now: clock.now, sleep: clock.sleep })
+    ).rejects.toThrow(/Rate limit exceeded/);
+    expect(getJob).not.toHaveBeenCalled();
+  });
+
+  it("reports a plain timeout (no pollError) when the job just never finishes in time", async () => {
+    const clock = fakeClock();
+    const start = vi.fn().mockResolvedValue({ gid: "j1", status: "in_progress" } as JobLike);
+    const getJob = vi.fn().mockResolvedValue({ gid: "j1", status: "in_progress" } as JobLike);
+
+    const result = await startAndPollJob(start, getJob, {
+      now: clock.now,
+      sleep: clock.sleep,
+      initialDelayMs: 1000,
+      maxDelayMs: 1000,
+      timeoutMs: 2000,
+    });
+
+    expect(start).toHaveBeenCalledTimes(1);
+    expect(result.timedOut).toBe(true);
+    expect(result.pollError).toBeUndefined();
+    expect(result.job).toEqual({ gid: "j1", status: "in_progress" });
   });
 });

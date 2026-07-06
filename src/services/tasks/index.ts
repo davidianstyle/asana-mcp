@@ -27,7 +27,7 @@ import {
   BatchActionResult,
   TaskBatchUpdateInput,
 } from "./batch.js";
-import { pollJob, JobLike } from "./jobs.js";
+import { startAndPollJob, JobLike } from "./jobs.js";
 
 // The generated .d.ts for searchTasksForWorkspace omits `limit` even though Asana's
 // docs ("Page sizes are limited to a maximum of 100 items, and can be specified by
@@ -653,21 +653,33 @@ export function registerTasksTools(
       if (name !== undefined) body.name = name;
       if (include !== undefined) body.include = include;
 
-      const jobRes = await tasks().duplicateTask({ data: body }, task_id, {
-        opt_fields: jobOptFields,
-      });
-      const initialJob = jobRes.data as JobLike;
-
-      const { job, timedOut } = await pollJob(async () => {
-        const res = await jobsApi().getJob(initialJob.gid, { opt_fields: jobOptFields });
-        return res.data as JobLike;
-      });
+      // startAndPollJob guarantees the mutation (duplicateTask) runs exactly
+      // once per tool call: an error from duplicateTask itself propagates (it
+      // was rejected pre-execution, so withErrorHandling's 429 handler — which
+      // re-invokes this WHOLE handler — may safely retry it), but any error
+      // while polling the job is swallowed into pollError instead. Letting a
+      // polling error escape would make that same retry create a SECOND
+      // duplicate, and any other rethrow would orphan the job gid.
+      const { job, timedOut, pollError } = await startAndPollJob(
+        async () => {
+          const res = await tasks().duplicateTask({ data: body }, task_id, {
+            opt_fields: jobOptFields,
+          });
+          return res.data as JobLike;
+        },
+        async (jobGid) => {
+          const res = await jobsApi().getJob(jobGid, { opt_fields: jobOptFields });
+          return res.data as JobLike;
+        }
+      );
 
       if (timedOut) {
         return textResult({
           job_gid: job.gid,
           status: "still_running",
-          note: "The duplication job hasn't finished within ~30s — it is still running server-side. Check back later (e.g. asana_get_task once you have the new task's gid) rather than retrying the duplication.",
+          note: pollError
+            ? `Polling the duplication job failed (${pollError}) — the duplication itself was accepted and is still running server-side. Check the job later rather than retrying the duplication (a retry would create a second duplicate).`
+            : "The duplication job hasn't finished within ~30s — it is still running server-side. Check back later (e.g. asana_get_task once you have the new task's gid) rather than retrying the duplication.",
         });
       }
 

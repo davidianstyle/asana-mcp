@@ -80,3 +80,43 @@ export async function pollJob(
 
   return { job, timedOut: !isJobTerminal(job) };
 }
+
+export interface StartAndPollJobResult extends PollJobResult {
+  /**
+   * Set when polling itself failed (rate limit, network, 5xx) after the job
+   * had already been started. The job keeps running server-side; `job` is the
+   * last-known record (at minimum the started job with its gid) and
+   * `timedOut` is true so callers report "still running" rather than failing.
+   */
+  pollError?: string;
+}
+
+/**
+ * Runs a job-backed mutation end-to-end: calls `start` (the mutation — e.g.
+ * `TasksApi.duplicateTask`) exactly once, then polls `getJob` until the job
+ * is terminal or the time budget runs out.
+ *
+ * The split in error behavior is deliberate and load-bearing:
+ *  - An error from `start` PROPAGATES. The mutation was rejected before it
+ *    executed, so the caller's withErrorHandling wrapper may safely retry the
+ *    whole handler (its 429 handling re-invokes the entire wrapped function).
+ *  - An error while POLLING is swallowed into `pollError`. At that point the
+ *    mutation has already been accepted and the job is running server-side —
+ *    letting the error escape would make withErrorHandling re-invoke the
+ *    handler and run the mutation AGAIN (e.g. a second duplicate task), and
+ *    any non-429 rethrow would orphan the job gid the caller needs in order
+ *    to check on it later.
+ */
+export async function startAndPollJob(
+  start: () => Promise<JobLike>,
+  getJob: (jobGid: string) => Promise<JobLike>,
+  options: PollJobOptions = {}
+): Promise<StartAndPollJobResult> {
+  const startedJob = await start();
+  try {
+    return await pollJob(() => getJob(startedJob.gid), options);
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    return { job: startedJob, timedOut: true, pollError: message };
+  }
+}
