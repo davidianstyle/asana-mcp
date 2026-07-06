@@ -3,6 +3,8 @@ import Asana from "asana";
 import { z } from "zod";
 import { ServiceContext } from "../../types.js";
 import { textResult } from "../../utils/formatting.js";
+import { withErrorHandling } from "../../utils/errors.js";
+import { limitParam, offsetParam, paginationOpts, pagedResult } from "../../utils/pagination.js";
 
 export function registerSectionsTools(
   server: McpServer,
@@ -15,11 +17,13 @@ export function registerSectionsTools(
     "List sections in a project",
     {
       project_id: z.string().describe("Project GID"),
+      limit: limitParam,
+      offset: offsetParam,
     },
-    async ({ project_id }) => {
-      const res = await sections().getSectionsForProject(project_id, {});
-      return textResult(res.data);
-    }
+    withErrorHandling(async ({ project_id, limit, offset }) => {
+      const res = await sections().getSectionsForProject(project_id, paginationOpts(limit, offset));
+      return textResult(pagedResult(res));
+    })
   );
 
   server.tool(
@@ -31,10 +35,10 @@ export function registerSectionsTools(
       insert_before: z.string().optional().describe("Section GID to insert before"),
       insert_after: z.string().optional().describe("Section GID to insert after"),
     },
-    async ({ project_id, name, insert_before, insert_after }) => {
+    withErrorHandling(async ({ project_id, name, insert_before, insert_after }) => {
       const res = await sections().createSectionForProject(project_id, { body: { data: { name, insert_before, insert_after } } });
       return textResult(res.data);
-    }
+    })
   );
 
   server.tool(
@@ -44,10 +48,10 @@ export function registerSectionsTools(
       section_id: z.string().describe("Section GID"),
       name: z.string().describe("New section name"),
     },
-    async ({ section_id, name }) => {
+    withErrorHandling(async ({ section_id, name }) => {
       const res = await sections().updateSection(section_id, { body: { data: { name } } });
       return textResult(res.data);
-    }
+    })
   );
 
   server.tool(
@@ -56,9 +60,9 @@ export function registerSectionsTools(
     {
       section_id: z.string().describe("Section GID to delete"),
     },
-    async ({ section_id }) => {
+    withErrorHandling(async ({ section_id }) => {
       await sections().deleteSection(section_id);
       return textResult({ ok: true, deleted: section_id });
-    }
+    })
   );
 }
